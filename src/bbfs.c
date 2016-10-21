@@ -23,7 +23,6 @@
 */
 
 #include "params.h"
-
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -36,13 +35,20 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
-
+#include <openssl/sha.h>
 #ifdef HAVE_SYS_XATTR_H
 #include <sys/xattr.h>
 #endif
 
 #include "log.h"
+// #include <map>
 
+struct master
+{
+    unsigned char** hash;
+    unsigned char** data;
+
+};
 //  All the paths I see are relative to the root of the mounted
 //  filesystem.  In order to get to the underlying filesystem, I need to
 //  have the mountpoint.  I'll save it away early on in main(), and then
@@ -136,7 +142,9 @@ int bb_mknod(const char *path, mode_t mode, dev_t dev)
     // make a fifo, but saying it should never actually be used for
     // that.
     if (S_ISREG(mode)) {
+
 	retstat = log_syscall("open", open(fpath, O_CREAT | O_EXCL | O_WRONLY, mode), 0);
+    // log_msg("Here is mode %s", mode);
 	if (retstat >= 0)
 	    retstat = log_syscall("close", close(retstat), 0);
     } else
@@ -351,7 +359,7 @@ int bb_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_
 // As  with read(), the documentation above is inconsistent with the
 // documentation for the write() system call.
 int bb_write(const char *path, const char *buf, size_t size, off_t offset,
-	     struct fuse_file_info *fi)
+	struct fuse_file_info *fi)
 {
     int retstat = 0;
     
@@ -360,8 +368,30 @@ int bb_write(const char *path, const char *buf, size_t size, off_t offset,
 	    );
     // no need to get fpath on this one, since I work from fi->fh not the path
     log_fi(fi);
-
+    unsigned char hash[SHA_DIGEST_LENGTH];
+    unsigned char hash2[SHA_DIGEST_LENGTH];
+    SHA1(buf, size, hash);
+    char buf2[4096];
+    struct fuse_file_info fi2;
+    struct fuse_file_info fi3;
+    struct stat stats;
+    bb_getattr("/Master", &stats);
+    fi2.flags = 0x00008002;
+    bb_open("/Master", &fi2);
+    int i;
+    int count = stats.st_size+stats.st_size/4096;
+    for (i = 0; i < count; ++i)
+    {
+        bb_read("/Master", buf2, 4096, i*4096, &fi2);
+        SHA1(buf2, size, hash2);
+        if (hash2 == hash)
+        {
+            log_msg("Yes!!!\n");
+        }
+    }
+    log_syscall("pwrite", pwrite(fi2.fh, buf, size, offset), 0);
     return log_syscall("pwrite", pwrite(fi->fh, buf, size, offset), 0);
+
 }
 
 /** Get file system statistics
@@ -682,11 +712,23 @@ int bb_fsyncdir(const char *path, int datasync, struct fuse_file_info *fi)
 // FUSE).
 void *bb_init(struct fuse_conn_info *conn)
 {
-    log_msg("\nbb_init()\n");
-    
+    log_msg("\nbb_init()\n");    
     log_conn(conn);
     log_fuse_context(fuse_get_context());
-    
+    bb_mknod("/Master", 0100777, 0);
+
+
+
+    // struct master* file_data;
+    // file_data = malloc(sizeof(struct master));
+    // file_data -> hash = malloc(file_data -> hash, sizeof(char))
+    // int fd = open("/$Master$", "rb");
+    // pwrite(fd, (char*)file_data, sizeof(struct master), 0);
+
+
+    // struct stat* metadata;
+    // metadata = malloc(sizeof(struct stat));
+    // bb_getattr("/Master", metadata);
     return BB_DATA;
 }
 
