@@ -23,7 +23,6 @@
 */
 
 #include "params.h"
-
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -36,13 +35,20 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
-
+#include <openssl/sha.h>
 #ifdef HAVE_SYS_XATTR_H
 #include <sys/xattr.h>
 #endif
 
 #include "log.h"
+// #include <map>
 
+struct master
+{
+    unsigned char** hash;
+    int size;
+    struct fuse_file_info fi;
+}masterHash;
 //  All the paths I see are relative to the root of the mounted
 //  filesystem.  In order to get to the underlying filesystem, I need to
 //  have the mountpoint.  I'll save it away early on in main(), and then
@@ -136,7 +142,9 @@ int bb_mknod(const char *path, mode_t mode, dev_t dev)
     // make a fifo, but saying it should never actually be used for
     // that.
     if (S_ISREG(mode)) {
+
 	retstat = log_syscall("open", open(fpath, O_CREAT | O_EXCL | O_WRONLY, mode), 0);
+    // log_msg("Here is mode %s", mode);
 	if (retstat >= 0)
 	    retstat = log_syscall("close", close(retstat), 0);
     } else
@@ -336,8 +344,21 @@ int bb_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_
 	    path, buf, size, offset, fi);
     // no need to get fpath on this one, since I work from fi->fh not the path
     log_fi(fi);
+    char buf2[SHA_DIGEST_LENGTH];
+    log_syscall("pread",pread(fi->fh, buf2, SHA_DIGEST_LENGTH, offset), 0);
+    int j = 0;
+    while(buf2[j++] == '\0');
+    unsigned char* hash = &buf2[j-1];
+    while(*hash < '0' || *hash > '9')
+    {
+        ++hash;
+    }
+    int off = atoi(hash);
+    log_syscall("pread", pread(masterHash.fi.fh, buf, size, off*4096), 0);
+    log_msg("READ_%d %s", off, buf);
+    return SHA_DIGEST_LENGTH;
+    // return log_syscall("pread", pread(fi->fh, buf, size, offset), 0);
 
-    return log_syscall("pread", pread(fi->fh, buf, size, offset), 0);
 }
 
 /** Write data to an open file
@@ -351,7 +372,7 @@ int bb_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_
 // As  with read(), the documentation above is inconsistent with the
 // documentation for the write() system call.
 int bb_write(const char *path, const char *buf, size_t size, off_t offset,
-	     struct fuse_file_info *fi)
+	struct fuse_file_info *fi)
 {
     int retstat = 0;
     
@@ -360,8 +381,30 @@ int bb_write(const char *path, const char *buf, size_t size, off_t offset,
 	    );
     // no need to get fpath on this one, since I work from fi->fh not the path
     log_fi(fi);
+    unsigned char hash[SHA_DIGEST_LENGTH];
+    SHA1(buf, size, hash);
+    int i;
+    char s[SHA_DIGEST_LENGTH];
+    bzero(s, SHA_DIGEST_LENGTH);
+    for (i = 0; i < masterHash.size-1; ++i)
+    {
+        if (!strcmp(masterHash.hash[i], hash))
+        {
+            int k = sprintf(s, "%d\n", i);
+            log_syscall("pwrite", pwrite(fi->fh, s, k, 20*offset/4096), 0);
+            return 4096;
+        }
+    }
+    masterHash.hash[masterHash.size-1] = hash;
+    log_syscall("pwrite", pwrite(masterHash.fi.fh, buf, size, (masterHash.size-1)*4096), 0);
+    masterHash.hash = realloc(masterHash.hash, (masterHash.size + 1)*sizeof(unsigned char*));
+    log_msg("\nAnswer is %s\n",masterHash.hash[masterHash.size-1]);
+    masterHash.size = masterHash.size + 1;
+    int k = sprintf(s, "%d\n", masterHash.size -2);
+    log_syscall("pwrite", pwrite(fi->fh, s, k, 20*offset/4096), 0);
+    return 4096;
 
-    return log_syscall("pwrite", pwrite(fi->fh, buf, size, offset), 0);
+
 }
 
 /** Get file system statistics
@@ -682,11 +725,30 @@ int bb_fsyncdir(const char *path, int datasync, struct fuse_file_info *fi)
 // FUSE).
 void *bb_init(struct fuse_conn_info *conn)
 {
-    log_msg("\nbb_init()\n");
-    
+    log_msg("\nbb_init()\n");    
     log_conn(conn);
     log_fuse_context(fuse_get_context());
-    
+    struct stat stats;
+    int s = bb_getattr("/Master", &stats);
+    if(s != -1){
+    bb_mknod("/Master", 0100777, 0);
+    }
+    char buf[4096];
+    masterHash.fi.flags = 0x00008002;
+    bb_open("/Master", &masterHash.fi);
+    unsigned char hash[SHA_DIGEST_LENGTH];
+    bb_getattr("/Master", &stats);
+    int i;
+    int count = stats.st_size/4096;
+    masterHash.hash = (char**)malloc((count+1)*sizeof(unsigned char*));
+    masterHash.size = count+1;
+    for (i = 0; i < count; ++i)
+    {
+        bb_read("/Master", buf, 4096, i*4096, &masterHash.fi);
+        SHA1(buf, 4096, hash);
+        masterHash.hash[i] = hash;
+        log_msg("\nHERE  %s\n",hash);
+    }
     return BB_DATA;
 }
 
